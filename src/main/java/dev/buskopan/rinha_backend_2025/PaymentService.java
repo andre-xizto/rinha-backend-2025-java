@@ -43,15 +43,20 @@ public class PaymentService {
     }
 
     public void process(PaymentRequest req) {
-        FormBody body = new FormBody.Builder()
-                .add("correlationId", req.correlationId().toString())
-                .add("amount", String.valueOf(req.amount()))
-                .add("requestedAt", LocalDateTime.now().toString())
-                .build();
+        String jsonBody = String.format(
+                "{ \"correlationId\":\"%s\", \"amount\":%s, \"requestedAt\":\"%s\" }",
+                req.correlationId(),
+                req.amount(),
+                LocalDateTime.now()
+        );
+
+        MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+        RequestBody body = RequestBody.create(jsonBody, JSON);
 
         Request requestDefault = new Request.Builder()
                 .url("http://payment-processor-default:8080/payments")
                 .post(body)
+                .header("Content-Type", "application/json")
                 .build();
 
         try (Response response = client.newCall(requestDefault).execute()) {
@@ -70,6 +75,7 @@ public class PaymentService {
         Request requestFallback = new Request.Builder()
                 .url("http://payment-processor-fallback:8080/payments")
                 .post(body)
+                .header("Content-Type", "application/json")
                 .build();
 
         try (Response responseFallback = client.newCall(requestFallback).execute()) {
