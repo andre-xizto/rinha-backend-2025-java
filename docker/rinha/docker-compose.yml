@@ -1,0 +1,76 @@
+x-rinha-template:
+  api-backend: &api-backend
+    build:
+      context: ../../
+      dockerfile: /docker/rinha/Dockerfile
+    environment:
+      URL_DB: db
+      PASSWORD_DB: 123
+      USER_DB: admin
+      NAME_DB: rinha-backend
+
+  db-postgres: &db-backend
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: 123
+      POSTGRES_DB: rinha-backend
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./files/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+
+services:
+  api-01:
+    <<: *api-backend
+    container_name: api-01
+    networks:
+      - db
+      - payment-processor
+      - rinha
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+  api-02:
+    <<: *api-backend
+    container_name: api-02
+    networks:
+      - db
+      - payment-processor
+      - rinha
+    ports:
+      - "8081:8080"
+    depends_on:
+      - db
+
+  pgadmin:
+    image: dpage/pgadmin4
+    ports:
+      - 5000:80
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    networks:
+      - db
+    depends_on:
+      - db
+
+  db:
+    <<: *db-backend
+    networks:
+      - db
+    container_name: db
+
+volumes:
+  db-data:
+
+networks:
+  rinha:
+    driver: bridge
+  db:
+    driver: bridge
+  payment-processor:
+    external: true
