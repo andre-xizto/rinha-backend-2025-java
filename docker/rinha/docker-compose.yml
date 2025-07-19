@@ -8,6 +8,11 @@ x-rinha-template:
       PASSWORD_DB: 123
       USER_DB: admin
       NAME_DB: rinha-backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: "100MB"
 
   db-postgres: &db-backend
     image: postgres:17-alpine
@@ -21,6 +26,11 @@ x-rinha-template:
       - db-data:/var/lib/postgresql/data
       - ./files/init.sql:/docker-entrypoint-initdb.d/init.sql
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.8"
+          memory: "200MB"
 
 services:
   api-01:

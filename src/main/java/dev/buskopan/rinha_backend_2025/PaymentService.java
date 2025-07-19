@@ -1,118 +1,75 @@
 package dev.buskopan.rinha_backend_2025;
 
-import jakarta.annotation.PostConstruct;
-import okhttp3.*;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
 
-import java.io.IOException;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
+import java.util.Map;
 
 @Service
 public class PaymentService {
+    private final WebClient webClient;
+    private final DatabaseClient db;
 
-    @Value("${URL_DB}")
-    private String urlDb;
-    @Value("${USER_DB}")
-    private String dbUser;
-    @Value("${NAME_DB}")
-    private String dbName;
-    @Value("${PASSWORD_DB}")
-    private String dbPassword;
+    private static final String DEFAULT_URL  = "http://payment-processor-default:8080";
+    private static final String FALLBACK_URL = "http://payment-processor-fallback:8080";
 
-    private String urlConnection;
-
-    private final OkHttpClient client;
-
-    public PaymentService(OkHttpClient client) {
-        this.client = client;
+    public PaymentService(WebClient webClient, DatabaseClient db) {
+        this.webClient = webClient;
+        this.db        = db;
     }
 
-    @PostConstruct
-    private void init() {
-        final String port = "5432";
-        this.urlConnection = String.format(
-                "jdbc:postgresql://%s:%s/%s",
-                urlDb, port, dbName
-        );
+    public Mono<Void> process(PaymentRequest req) {
+        return callProcessor(DEFAULT_URL, req)
+                .onErrorResume(err -> callProcessor(FALLBACK_URL, req))
+                .then();
     }
 
-    public void process(PaymentRequest req) {
-        String jsonBody = String.format(
-                "{ \"correlationId\":\"%s\", \"amount\":%s, \"requestedAt\":\"%s\" }",
-                req.correlationId(),
-                req.amount(),
-                LocalDateTime.now()
+    private Mono<Void> callProcessor(String baseUrl, PaymentRequest req) {
+        Map<String,Object> payload = Map.of(
+                "correlationId", req.correlationId(),
+                "amount",        req.amount(),
+                "requestedAt",   LocalDateTime.now().toString()
         );
 
-        MediaType JSON = MediaType.parse("application/json; charset=utf-8");
-        RequestBody body = RequestBody.create(jsonBody, JSON);
-
-        Request requestDefault = new Request.Builder()
-                .url("http://payment-processor-default:8080/payments")
-                .post(body)
-                .header("Content-Type", "application/json")
-                .build();
-
-        try (Response response = client.newCall(requestDefault).execute()) {
-            String respBody = response.body().string();
-            System.out.println("Default response: " + respBody);
-            System.out.println("Default HTTP code: " + response.code());
-
-            if (response.isSuccessful()) {
-                insertDB(req, "default");
-                return;
-            }
-        } catch (IOException e) {
-            System.err.println("Erro no default processor: " + e.getMessage());
-        }
-
-        Request requestFallback = new Request.Builder()
-                .url("http://payment-processor-fallback:8080/payments")
-                .post(body)
-                .header("Content-Type", "application/json")
-                .build();
-
-        try (Response responseFallback = client.newCall(requestFallback).execute()) {
-            String fallbackBody = responseFallback.body().string();
-            System.out.println("Fallback response: " + fallbackBody);
-            System.out.println("Fallback HTTP code: " + responseFallback.code());
-
-            if (responseFallback.isSuccessful()) {
-                insertDB(req, "fallback");
-            } else {
-                System.err.println("Fallback também falhou com código: "
-                        + responseFallback.code());
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("Erro no fallback processor", e);
-        }
+        return webClient.post()
+                .uri(baseUrl + "/payments")
+                .bodyValue(payload)
+                .retrieve()
+                .onStatus(status -> !status.is2xxSuccessful(),
+                        resp -> Mono.error(new RuntimeException("HTTP " + resp.statusCode())))
+                .bodyToMono(String.class)
+                .flatMap(respBody -> insertDB(req, baseUrl.contains("fallback") ? "fallback" : "default")).then();
     }
 
-
-    private void insertDB(PaymentRequest req, String processorType) {
+    private Mono<Long> insertDB(PaymentRequest req, String processor) {
         LocalDateTime now = LocalDateTime.now();
-        StringBuilder sb = new StringBuilder();
-        sb.append("INSERT INTO payments ")
-                .append("(correlationId, amount, requested_at, processor) VALUES (")
-                .append("'").append(req.correlationId()).append("'").append(",")
-                .append(req.amount()).append(",")
-                .append("'").append(now).append("'").append(",")
-                .append("'").append(processorType).append("'")
-                .append(")");
+        return db.sql("""
+                INSERT INTO payments(correlationId, amount, requested_at, processor)
+                VALUES($1, $2, $3, $4)
+            """)
+                .bind(0, req.correlationId())
+                .bind(1, req.amount())
+                .bind(2, now)
+                .bind(3, processor)
+                .fetch()
+                .rowsUpdated();
+    }
 
-        try (Connection con = DriverManager.getConnection(urlConnection, dbUser, dbPassword)) {
-            try (Statement stmt = con.createStatement()) {
-                int executed = stmt.executeUpdate(sb.toString());
-                System.out.println("ITEMS INSERTED: " + executed);
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
+    public Mono<HealthResponse> checkDefault() {
+        return webClient.get()
+                .uri(DEFAULT_URL + "/payments/service-health")
+                .retrieve()
+                .bodyToMono(HealthResponse.class);
+    }
+
+    public Mono<HealthResponse> checkFallback() {
+        return webClient.get()
+                .uri(FALLBACK_URL + "/payments/service-health")
+                .retrieve()
+                .bodyToMono(HealthResponse.class)
+                .onErrorReturn(new HealthResponse(true, -1));
     }
 }
